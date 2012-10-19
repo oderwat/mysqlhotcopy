@@ -30,6 +30,8 @@ mysqlhotcopy - fast on-line hot-backup utility for local MySQL databases and tab
 
   mysqlhotcopy db_name_1./regex_1/ db_name_1./regex_2/ ... db_name_n./regex_n/ /path/to/new_directory
 
+  mysqlhotcopy --method=rsync [arguments as above]
+
   mysqlhotcopy --method='scp -Bq -i /usr/home/foo/.ssh/identity' --user=root --password=secretpassword \
          db_1./^nice_table/ user@some.system.dom:~/path/to/new_directory
 
@@ -61,7 +63,11 @@ Usage: $0 db_name[./table_regex/] [new_db_name | directory]
   --addtodest          don\'t rename target dir if it exists, just add files to it
   --keepold            don\'t delete previous (now renamed) target when done
   --noindices          don\'t include full index files in copy
-  --method=#           method for copy (only "cp" currently supported)
+   --method=cp         copy of data files will use standard OS cp
+   --method=rsync      copy of data files will use local rsync
+                       to overwrite potentially existing files;
+                       allowold and keepold become irrelevant.
+                       added by mengwong(at)pobox.com 20010402
 
   -q, --quiet          be silent except for errors
   --debug              enable debug
@@ -163,6 +169,7 @@ my $start_time = time;
 $opt_tmpdir= $opt{tmpdir} if $opt{tmpdir};
 $0 = $1 if $0 =~ m:/([^/]+)$:;
 $opt{quiet} = 0 if $opt{debug};
+$opt{keepold} = 1 if $opt{method} eq "rsync";
 $opt{allowold} = 1 if $opt{keepold};
 
 # --- connect to the database ---
@@ -362,6 +369,9 @@ if (defined($tgt_name) && length $tgt_name ) {
 	if (!(-e $tgt_dirname && -d $tgt_dirname ) );
       foreach my $rdb ( @db_desc ) {
 	$rdb->{target} = "$tgt_dirname/$rdb->{src}";
+
+	# man rsync for significance of trailing /  --- mengwong 20010402
+	for ($rdb->{target}) { $_ .= "/" if not /\/$/ and $opt{method} eq "rsync" }
       }
     }
   }
@@ -383,41 +393,45 @@ die "No tables to hot-copy" unless ( length $hc_locks );
 
 my @existing = ();
 
-if ($opt{method} =~ /^cp\b/)
-{
-  foreach my $rdb ( @db_desc ) {
-    push @existing, $rdb->{target} if ( -d  $rdb->{target} );
-  }
+# method=rsync overwrites existing files, so no need to rmdir / mkdir.
+unless ($opt{method} eq "rsync") {
 
-  if ( @existing && !($opt{allowold} || $opt{addtodest}) )
+  if ($opt{method} =~ /^cp\b/)
   {
-    $dbh->disconnect();
-    die "Can't hotcopy to '", join( "','", @existing ), "' because directory\nalready exist and the --allowold or --addtodest options were not given.\n"
+    foreach my $rdb ( @db_desc ) {
+      push @existing, $rdb->{target} if ( -d  $rdb->{target} );
+    }
+
+    if ( @existing && !($opt{allowold} || $opt{addtodest}) )
+    {
+      $dbh->disconnect();
+      die "Can't hotcopy to '", join( "','", @existing ), "' because directory\nalready exist and the --allowold or --addtodest options were not given.\n"
+    }
   }
-}
 
-retire_directory( @existing ) if @existing && !$opt{addtodest};
+  retire_directory( @existing ) if @existing && !$opt{addtodest};
 
-foreach my $rdb ( @db_desc ) {
-    my $tgt_dirpath = "$rdb->{target}";
-    # Remove trailing slashes (needed for Mac OS X)
-    substr($tgt_dirpath, 1) =~ s|/+$||;
-    if ( $opt{dryrun} ) {
-        print "mkdir $tgt_dirpath, 0750\n";
-    }
-    elsif ($opt{method} =~ /^scp\b/) {
-        ## assume it's there?
-        ## ...
-    }
-    else {
-        mkdir($tgt_dirpath, 0750) or die "Can't create '$tgt_dirpath': $!\n"
-            unless -d $tgt_dirpath;
-        if ($^O !~ m/^(NetWare)$/)  
-        {
-            my @f_info= stat "$datadir/$rdb->{src}";
-            chown $f_info[4], $f_info[5], $tgt_dirpath;
-        }
-    }
+  foreach my $rdb ( @db_desc ) {
+      my $tgt_dirpath = "$rdb->{target}";
+      # Remove trailing slashes (needed for Mac OS X)
+      substr($tgt_dirpath, 1) =~ s|/+$||;
+      if ( $opt{dryrun} ) {
+          print "mkdir $tgt_dirpath, 0750\n";
+      }
+      elsif ($opt{method} =~ /^scp\b/) {
+          ## assume it's there?
+          ## ...
+      }
+      else {
+          mkdir($tgt_dirpath, 0750) or die "Can't create '$tgt_dirpath': $!\n"
+              unless -d $tgt_dirpath;
+          if ($^O !~ m/^(NetWare)$/)  
+          {
+              my @f_info= stat "$datadir/$rdb->{src}";
+              chown $f_info[4], $f_info[5], $tgt_dirpath;
+          }
+      }
+  }
 }
 
 ##############################
@@ -591,6 +605,13 @@ sub copy_files {
 	# perform the actual copy
 	safe_system( $cp, (map { "'$_'" } @$files), "'$target'" );
     }
+    elsif ($method eq "rsync") { # rsync --- but locally
+  my $cp = $method;
+  # use the rsync archive mode for the copied files
+  $cp.= " -a" if $^O =~ m/^(solaris|linux|freebsd|darwin)$/;
+  safe_system( $cp, (map { "'$_'" } @$files), "'$target'" );
+ 
+    }
     else
     {
 	die "Can't use unsupported method '$method'\n";
@@ -599,7 +620,7 @@ sub copy_files {
 
 #
 # Copy only the header of the index file
-#
+# 
 
 sub copy_index
 {
@@ -617,9 +638,11 @@ sub copy_index
     die "Can't read index header from $from\n" if ($length < 1024);
     close INPUT;
     
+    my $filesize = -s $from;
+
     if ( $opt{dryrun} )
     {
-      print "$opt{method}-header $from $to\n";
+      print "$opt{method}-header $from $to (will copy only $length bytes of $filesize)\n";
     }
     elsif ($opt{method} eq 'cp')
     {
@@ -1064,6 +1087,11 @@ Monty - Working --noindex (copy only first 2048 bytes of index file).
 Ask Bjoern Hansen - Cleanup code to fix a few bugs and enable -w again.
 
 Emil S. Hansen - Added resetslave and resetmaster.
+
+20010402 Meng Weng Wong <mengwong@pobox.com>
+
+    added --method=rsync for when you want to update a previously
+    made hotcopy.
 
 Jeremy D. Zawodny - Removed deprecated DBI calls.  Fixed bug which
 resulted in nothing being copied when a regexp was specified but no
