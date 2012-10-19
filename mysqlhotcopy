@@ -653,6 +653,16 @@ sub copy_index
       }
       close OUTPUT	   || die "Error on close of $to: $!\n";
     }
+    elsif ($opt{method} eq 'rsync')
+    {
+      # doing the same as with cp actually
+      open(OUTPUT,">$to")   || die "Can\'t create file $to: $!\n";
+      if (syswrite(OUTPUT,$buff) != length($buff))
+      {
+  die "Error when writing data to $to: $!\n";
+      }
+      close OUTPUT     || die "Error on close of $to: $!\n";
+    }
     elsif ($opt{method} =~ /^scp\b/)
     {
       my ($fh, $tmp)= tempfile('mysqlhotcopy-XXXXXX', DIR => $opt_tmpdir) or
@@ -1100,3 +1110,8 @@ database name(s).
 Martin Waite - Fix to handle database name that contains space.
 
 Paul DuBois - Remove end '/' from directory names.
+
+20121019 Hans Raaf <hara@oderwat.de>
+
+    Made Meng Weng Wongs modifications into my current mysqlhotcopy version
+    and added that --noindices is working with method=rsync
