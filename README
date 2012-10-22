@@ -1,0 +1,1 @@
+This is the original mysqlhotcopy being modified to use rsync for quicker local snapshots of a live mysql database. 
